@@ -5,30 +5,32 @@ require 'base64'
 
 module S3FileLib
   BLOCKSIZE_TO_READ = 1024 * 1000 unless const_defined?(:BLOCKSIZE_TO_READ)
+  AMZSHA256 = Digest::SHA256.hexdigest ""
   
-  def self.build_headers(date, authorization, token)
+  def self.build_headers(date, authorization)
+
     headers = {
-      :date => date,
-      :authorization => authorization
+      'x-amz-content-sha256' => AMZSHA256,
+      'x-amz-date' => date,
+      'Authorization' => authorization
     }
-    if token
-      headers['x-amz-security-token'] = token
-    end
-        
+
     return headers
   end
   
-  def self.get_md5_from_s3(bucket,url,path,aws_access_key_id,aws_secret_access_key,token)
-    return get_digests_from_s3(bucket,url,path,aws_access_key_id,aws_secret_access_key,token)["md5"]
+  def self.get_md5_from_s3(bucket,path,aws_access_key_id,aws_secret_access_key,region)
+    return get_digests_from_s3(bucket,path,aws_access_key_id,aws_secret_access_key,region)["md5"]
   end
   
-  def self.get_digests_from_s3(bucket,url,path,aws_access_key_id,aws_secret_access_key,token)
+  def self.get_digests_from_s3(bucket,path,aws_access_key_id,aws_secret_access_key,region)
     client = self.client
-    now, auth_string = get_s3_auth("HEAD", bucket,path,aws_access_key_id,aws_secret_access_key, token)
+    now, auth_string = get_s3_auth("HEAD", bucket,path,aws_access_key_id,aws_secret_access_key, region)
     
-    headers = build_headers(now, auth_string, token)
+    headers = build_headers(now, auth_string)
+    endpoint = build_endpoint(region)
+    headers['host'] = "%s.%s" % [bucket,endpoint]
 
-    url = "https://#{bucket}.s3.amazonaws.com" if url.nil?
+    url = "https://#{bucket}.#{endpoint}"
 
     response = client.head("#{url}#{path}", headers)
     
@@ -39,13 +41,14 @@ module S3FileLib
     return {"md5" => etag}.merge(digests)
   end
 
-  def self.get_from_s3(bucket,url,path,aws_access_key_id,aws_secret_access_key,token)
+  def self.get_from_s3(bucket,path,aws_access_key_id,aws_secret_access_key,region)
     client = self.client
-    now, auth_string = get_s3_auth("GET", bucket,path,aws_access_key_id,aws_secret_access_key, token)
+    now, auth_string = get_s3_auth("GET", bucket,path,aws_access_key_id,aws_secret_access_key, region)
+    endpoint = build_endpoint(region)
+    url = "https://#{bucket}.#{endpoint}"    
 
-    url = "https://#{bucket}.s3.amazonaws.com" if url.nil?
-    
-    headers = build_headers(now, auth_string, token)
+    headers = build_headers(now, auth_string)
+    headers['host'] = "%s.%s" % [bucket,endpoint]
     retries = 5
     for attempts in 0..5
       begin
@@ -65,21 +68,23 @@ module S3FileLib
     return response
   end
 
-  def self.get_s3_auth(method, bucket,path,aws_access_key_id,aws_secret_access_key, token)
-    now = Time.now().utc.strftime('%a, %d %b %Y %H:%M:%S GMT')
-    string_to_sign = "#{method}\n\n\n%s\n" % [now]
-    
-    if token
-      string_to_sign += "x-amz-security-token:#{token}\n"
-    end
-    
-    string_to_sign += "/%s%s" % [bucket,path]
-
-    digest = OpenSSL::Digest.new('sha1')
-    signed = OpenSSL::HMAC.digest(digest, aws_secret_access_key, string_to_sign)
-    signed_base64 = Base64.encode64(signed)
-
-    auth_string = 'AWS %s:%s' % [aws_access_key_id,signed_base64]
+  def self.get_s3_auth(method, bucket,path,aws_access_key_id,aws_secret_access_key, region)
+    service = 's3'
+    endpoint = build_endpoint(region)
+    host = "%s.%s" % [bucket,endpoint]
+    now = Time.now().utc.strftime('%Y%m%dT%H%M%SZ')
+    datestamp = Time.now().utc.strftime('%Y%m%d')
+    payload_hash = amzsha256 = AMZSHA256
+    canonical_headers = 'host:' + host + "\n" + 'x-amz-content-sha256:' + amzsha256 + "\n" + 'x-amz-date:' + now + "\n"
+    signed_headers = 'host;x-amz-content-sha256;x-amz-date'
+    canonical_request = "#{method}\n%s\n\n%s\n%s\n%s" % [path,canonical_headers,signed_headers,payload_hash]
+    canonical_request_sha256 = Digest::SHA256.hexdigest canonical_request
+    algorithm = 'AWS4-HMAC-SHA256'
+    credential_scope = "%s/%s/%s/aws4_request" % [datestamp,region,service]
+    string_to_sign = "%s\n%s\n%s\n%s" % [algorithm,now,credential_scope,canonical_request_sha256]
+    signing_key = getSignatureKey(aws_secret_access_key, datestamp, region, service)
+    signature = OpenSSL::HMAC.hexdigest('sha256', signing_key, string_to_sign)
+    auth_string = algorithm + ' ' + 'Credential=' + aws_access_key_id + '/' + credential_scope + ',' +  'SignedHeaders=' + signed_headers + ',' + 'Signature=' + signature
         
     [now,auth_string]
   end
@@ -142,4 +147,30 @@ module S3FileLib
     RestClient.proxy = ENV['http_proxy']
     RestClient
   end
+
+  def self.getSignatureKey(key, dateStamp, regionName, serviceName)
+      kDate    = OpenSSL::HMAC.digest('sha256', "AWS4" + key, dateStamp)
+      kRegion  = OpenSSL::HMAC.digest('sha256', kDate, regionName)
+      kService = OpenSSL::HMAC.digest('sha256', kRegion, serviceName)
+      kSigning = OpenSSL::HMAC.digest('sha256', kService, "aws4_request")
+
+      kSigning
+  end
+  def self.build_endpoint(region)
+      endpointlist = {
+          "ap-northeast-1" => "s3-ap-northeast-1.amazonaws.com",
+          "ap-southeast-1" => "s3-ap-southeast-1.amazonaws.com",
+          "ap-southeast-2" => "s3-ap-southeast-2.amazonaws.com",
+          "cn-north-1" => "s3.cn-north-1.amazonaws.com.cn",
+          "eu-west-1" => "s3-eu-west-1.amazonaws.com",
+          "sa-east-1" => "s3-sa-east-1.amazonaws.com",
+          "us-east-1" => "s3.amazonaws.com",
+          "us-gov-west-1" => "s3-us-gov-west-1.amazonaws.com",
+          "us-west-1" => "s3-us-west-1.amazonaws.com",
+          "us-west-2" => "s3-us-west-2.amazonaws.com",
+          "eu-central-1" => "s3.eu-central-1.amazonaws.com"
+      }
+    return endpointlist[region]
+  end
+
 end

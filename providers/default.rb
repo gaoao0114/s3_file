@@ -14,11 +14,11 @@ action :create do
   # we need credentials to be mutable
   aws_access_key_id = new_resource.aws_access_key_id
   aws_secret_access_key = new_resource.aws_secret_access_key
-  token = new_resource.token
+  region = new_resource.region
   decryption_key = new_resource.decryption_key
 
   # if credentials not set, try instance profile
-  if aws_access_key_id.nil? && aws_secret_access_key.nil? && token.nil?
+  if aws_access_key_id.nil? && aws_secret_access_key.nil?
     instance_profile_base_url = 'http://169.254.169.254/latest/meta-data/iam/security-credentials/'
     begin
       instance_profiles = client.get(instance_profile_base_url)
@@ -30,13 +30,12 @@ action :create do
 
     aws_access_key_id = instance_profile['AccessKeyId']
     aws_secret_access_key = instance_profile['SecretAccessKey']
-    token = instance_profile['Token']
   end
 
   if ::File.exists?(new_resource.path)
     if decryption_key.nil?
       if new_resource.decrypted_file_checksum.nil?
-        s3_md5 = S3FileLib::get_md5_from_s3(new_resource.bucket, new_resource.s3_url, remote_path, aws_access_key_id, aws_secret_access_key, token)
+        s3_md5 = S3FileLib::get_md5_from_s3(new_resource.bucket, remote_path, aws_access_key_id, aws_secret_access_key, region)
 
         if S3FileLib::verify_md5_checksum(s3_md5, new_resource.path)
           Chef::Log.debug 'Skipping download, md5sum of local file matches file in S3.'
@@ -62,7 +61,7 @@ action :create do
   end
 
   if download
-    response = S3FileLib::get_from_s3(new_resource.bucket, new_resource.s3_url, remote_path, aws_access_key_id, aws_secret_access_key, token)
+    response = S3FileLib::get_from_s3(new_resource.bucket, remote_path, aws_access_key_id, aws_secret_access_key, region)
 
     # not simply using the file resource here because we would have to buffer
     # whole file into memory in order to set content this solves
