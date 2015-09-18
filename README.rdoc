@@ -16,7 +16,7 @@ Attribute Parameters:
 * `aws_access_key_id` - your AWS access key id. (optional)
 * `aws_secret_access_key` - your AWS secret access key. (optional)
 * `bucket` - the bucket to pull from.
-* `region` - Custom S3 URL. If specified this URL *must* include the bucket name at the end. (optional)
+* `region` -  S3 region. ex us-west-1, cn-north-1 
 * `remote_path` - the S3 key to pull.
 * `owner` - the owner of the file. (optional)
 * `group` - the group owner of the file. (optional)
